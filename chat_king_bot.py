@@ -40,7 +40,7 @@ async def show_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, user_data in enumerate(sorted_users[:10]):
         text += f"{emojis[i]} {user_data['name']} 님\n💬 {user_data['count']}회 기록!\n\n"
     
-    text += "채팅참여해서 상금 받아가세요!"
+    text += "채팅참여하시고 포인트 받아가세요!"
     await update.message.reply_text(text)
 
 # [기능 3] ★오직 방 소유자만★ 점수를 다시 0으로 청소할 수 있는 '/reset' 명령어예요.
