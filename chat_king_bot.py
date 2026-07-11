@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import sys
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ChatMemberStatus
@@ -11,7 +12,7 @@ if sys.platform == 'win32':
 
 # 사람들의 채팅 횟수를 기록할 공책이에요.
 chat_database = {}
-TOKEN = "8573436045:AAFT4Z9_T-JzSgYN9uvp9rj1amZw3LJ1_ug"
+TOKEN = os.environ.get("BOT_TOKEN")
 
 # 컴퓨터 창에 실행 상태를 보여주는 설정
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
