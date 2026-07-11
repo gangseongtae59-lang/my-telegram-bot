@@ -1,88 +1,336 @@
 import logging
-import asyncio
-import sys
 import os
+import threading
+import time
+
+from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ChatMemberStatus
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-# [버그 수리] 가상 컴퓨터 안에서 로봇이 먹통이 되는 현상을 완벽하게 방지합니다.
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# --------------------------------------------------
+# 기본 설정
+# --------------------------------------------------
 
-# 사람들의 채팅 횟수를 기록할 공책이에요.
-chat_database = {}
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
 TOKEN = os.environ.get("BOT_TOKEN")
 
-# 컴퓨터 창에 실행 상태를 보여주는 설정
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+if not TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN이 없습니다. Render의 Environment에 BOT_TOKEN을 입력하세요."
+    )
 
-# [기능 1] 방에 대화가 올라올 때마다 숫자를 1씩 더하는 규칙이에요.
-async def check_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 채팅 횟수를 저장하는 공간
+chat_database = {}
+
+# --------------------------------------------------
+# Render 확인용 웹 서버
+# --------------------------------------------------
+
+web_app = Flask(__name__)
+
+
+@web_app.route("/")
+def home():
+    return "Telegram ranking bot is running!", 200
+
+
+@web_app.route("/health")
+def health():
+    return "OK", 200
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", "10000"))
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port,
+        use_reloader=False,
+    )
+
+
+# --------------------------------------------------
+# 사용자 이름 만들기
+# --------------------------------------------------
+
+def get_user_name(user):
+    if user.username:
+        return f"@{user.username}"
+
+    if user.full_name:
+        return user.full_name
+
+    return f"사용자 {user.id}"
+
+
+# --------------------------------------------------
+# 일반 채팅 횟수 집계
+# --------------------------------------------------
+
+async def check_chat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     user = update.effective_user
-    if not user or user.is_bot: 
+    chat = update.effective_chat
+
+    if not user or not chat:
         return
-    
+
+    if user.is_bot:
+        return
+
+    # 개인 채팅은 세지 않고 그룹 채팅만 셉니다.
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    chat_id = chat.id
     user_id = user.id
-    user_name = user.name  # 에러가 절대로 나지 않는 가장 안전한 영어 아이디로 기록해요!
+    user_name = get_user_name(user)
 
-    if user_id not in chat_database:
-        chat_database[user_id] = {"name": user_name, "count": 0}
-    
-    chat_database[user_id]["count"] += 1
+    # 그룹마다 기록을 따로 저장합니다.
+    if chat_id not in chat_database:
+        chat_database[chat_id] = {}
 
-# [기능 2] ★누구나★ '/rank'라고 명령어를 치면 순위를 보여주는 규칙이에요.
-async def show_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not chat_database:
-        await update.message.reply_text("아직 아무도 말을 하지 않았어요 😢")
+    if user_id not in chat_database[chat_id]:
+        chat_database[chat_id][user_id] = {
+            "name": user_name,
+            "count": 0,
+        }
+
+    # 사용자가 텔레그램 이름을 변경하면 최신 이름으로 바꿉니다.
+    chat_database[chat_id][user_id]["name"] = user_name
+    chat_database[chat_id][user_id]["count"] += 1
+
+
+# --------------------------------------------------
+# 랭킹 보기: /rank
+# --------------------------------------------------
+
+async def show_ranking(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if not chat or not message:
         return
 
-    # 대화 횟수가 높은 순서대로 10등까지 정렬해요.
-    sorted_users = sorted(chat_database.values(), key=lambda x: x['count'], reverse=True)
-    
-    text = "🔥 일일 채팅왕 랭킹 🔥\n\n"
-    emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    
-    for i, user_data in enumerate(sorted_users[:10]):
-        text += f"{emojis[i]} {user_data['name']} 님\n💬 {user_data['count']}회 기록!\n\n"
-    
-    text += "채팅참여하시고 포인트 받아가세요!"
-    await update.message.reply_text(text)
+    group_data = chat_database.get(chat.id, {})
 
-# [기능 3] ★오직 방 소유자만★ 점수를 다시 0으로 청소할 수 있는 '/reset' 명령어예요.
-async def reset_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
+    if not group_data:
+        await message.reply_text(
+            "아직 집계된 채팅이 없습니다.\n"
+            "그룹에서 채팅을 시작해 주세요 😊"
+        )
+        return
+
+    sorted_users = sorted(
+        group_data.values(),
+        key=lambda item: item["count"],
+        reverse=True,
+    )
+
+    rank_marks = [
+        "🥇",
+        "🥈",
+        "🥉",
+        "#4",
+        "#5",
+        "#6",
+        "#7",
+        "#8",
+        "#9",
+        "#10",
+    ]
+
+    lines = [
+        "🔥 일일 채팅왕 랭킹 🔥",
+        "",
+    ]
+
+    for index, user_data in enumerate(sorted_users[:10]):
+        lines.append(
+            f"{rank_marks[index]} {user_data['name']}"
+        )
+        lines.append(
+            f"💬 {user_data['count']:,}회"
+        )
+        lines.append("")
+
+    lines.append("오늘도 열심히 채팅하고 순위에 도전하세요! 🎉")
+
+    await message.reply_text("\n".join(lines))
+
+
+# --------------------------------------------------
+# 내 채팅 횟수 보기: /my
+# --------------------------------------------------
+
+async def show_my_count(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+
+    if not chat or not user or not message:
+        return
+
+    user_data = chat_database.get(chat.id, {}).get(user.id)
+
+    if not user_data:
+        await message.reply_text(
+            "아직 집계된 채팅 기록이 없습니다."
+        )
+        return
+
+    await message.reply_text(
+        f"💬 {user_data['name']}님의 채팅 횟수는 "
+        f"{user_data['count']:,}회입니다."
+    )
+
+
+# --------------------------------------------------
+# 관리자 확인
+# --------------------------------------------------
+
+async def is_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not chat or not user:
+        return False
+
     try:
-        # 명령어를 친 사람이 이 방의 진짜 소유자(방장)인지 신분증을 검사해요!
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status != ChatMemberStatus.OWNER:
-            # 소유자가 아니라면 거절 메시지를 보내고 규칙을 무시해요!
-            await update.message.reply_text("🔒 이 명령어는 오직 그룹 소유자님만 사용할 수 있습니다!")
-            return
-            
-        # 진짜 방 소유자가 맞다면 깨끗하게 청소해 줍니다!
-        global chat_database
-        chat_database.clear()
-        await update.message.reply_text("채팅 기록이 모두 0으로 초기화되었습니다! 새 게임 시작! 🏁")
-        
-    except Exception as e:
-        logging.error(f"방 소유자 확인 중 에러 발생: {e}")
+        member = await context.bot.get_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+        )
 
-def main():
-    # 최신 방식의 로봇 엔진을 빌드합니다.
-    application = Application.builder().token(TOKEN).build()
+        return member.status in (
+            ChatMemberStatus.OWNER,
+            ChatMemberStatus.ADMINISTRATOR,
+        )
 
-    # 로봇에게 규칙을 가르쳐 줍니다.
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_chat))
-    application.add_handler(CommandHandler("rank", show_ranking)) 
-    application.add_handler(CommandHandler("reset", reset_ranking)) 
+    except Exception:
+        logger.exception("관리자 확인 중 오류가 발생했습니다.")
+        return False
 
-    print("로봇 비서가 열심히 일하는 중입니다... 컴퓨터를 끄지 마세요!")
-    
-    # 로봇 가동 시작!
-    application.run_polling()
 
-if __name__ == '__main__':
-    main()
+# --------------------------------------------------
+# 기록 초기화: /reset
+# --------------------------------------------------
+
+async def reset_ranking(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if not chat or not message:
+        return
+
+    if not await is_admin(update, context):
+        await message.reply_text(
+            "🔒 이 명령어는 그룹 관리자만 사용할 수 있습니다."
+        )
+        return
+
+    chat_database.pop(chat.id, None)
+
+    await message.reply_text(
+        "✅ 이 그룹의 채팅 기록이 모두 초기화되었습니다!\n"
+        "새로운 이벤트를 시작합니다. 🏁"
+    )
+
+
+# --------------------------------------------------
+# 오류 기록
+# --------------------------------------------------
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    logger.error(
+        "봇에서 오류가 발생했습니다.",
+        exc_info=context.error,
+    )
+
+
+# --------------------------------------------------
+# 텔레그램 봇 실행
+# --------------------------------------------------
+
+def run_telegram_bot():
+    while True:
+        try:
+            application = Application.builder().token(TOKEN).build()
+
+            application.add_handler(
+                CommandHandler("rank", show_ranking)
+            )
+
+            application.add_handler(
+                CommandHandler("my", show_my_count)
+            )
+
+            application.add_handler(
+                CommandHandler("reset", reset_ranking)
+            )
+
+            application.add_handler(
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    check_chat,
+                )
+            )
+
+            application.add_error_handler(error_handler)
+
+            logger.info("텔레그램 채팅왕 봇을 시작합니다.")
+
+            application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+            )
+
+        except Exception:
+            logger.exception(
+                "텔레그램 연결에 실패했습니다. 10초 뒤 다시 시도합니다."
+            )
+            time.sleep(10)
+
+
+# --------------------------------------------------
+# 프로그램 시작
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    telegram_thread = threading.Thread(
+        target=run_telegram_bot,
+        daemon=True,
+    )
+    telegram_thread.start()
+
+    run_web_server()
