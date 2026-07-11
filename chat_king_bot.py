@@ -1,8 +1,13 @@
 import logging
 import asyncio
+import sys
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ChatMemberStatus
+
+# [버그 수리] 가상 컴퓨터 안에서 로봇이 먹통이 되는 현상을 완벽하게 방지합니다.
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # 사람들의 채팅 횟수를 기록할 공책이에요.
 chat_database = {}
